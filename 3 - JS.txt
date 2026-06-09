@@ -1,0 +1,200 @@
+/* ================================
+   DOM REFERENCES
+================================ */
+
+const fill = document.getElementById('fill');
+
+/* ================================
+   STATE
+================================ */
+
+let widgetData = {};
+let currentLevel = 0;
+let socket = null;
+let reconnectTimer = null;
+
+/* ================================
+   HEAT STYLE LOGIC
+================================ */
+
+function getHeatStyle(level) {
+  if (level >= 21) return { color: '#2B0000', glow: true };
+  if (level >= 17) return { color: '#820000', glow: false };
+  if (level >= 11) return { color: '#DD1D1D', glow: false };
+  if (level >= 8)  return { color: '#DD5A34', glow: false };
+  if (level >= 4)  return { color: '#FFA600', glow: false };
+  return { color: '#FFD900', glow: false };
+}
+
+/* ================================
+   CORE METER UPDATE
+================================ */
+
+function applyMeter(level, percent) {
+  // Ignore non-finite values (e.g. a goal of 0 before the first real
+  // contribution, which makes progress/goal NaN or Infinity). Returning
+  // here leaves the bar at its current width instead of blanking it to 0%.
+  if (!isFinite(percent)) return;
+  percent = Math.min(Math.max(percent, 0), 100);
+
+  // Assign only the real target width. The CSS transition on #fill animates
+  // from the current width to this value, so within a level the fill glides
+  // forward and is never snapped back to 0 between progress events. The bar
+  // returns to 0 only via resetMeter() (hype_train.end); a new, higher level
+  // animates smoothly down to its low starting percentage rather than jumping.
+  fill.style.width = percent + '%';
+
+  const heat = getHeatStyle(level);
+  fill.style.backgroundColor = heat.color;
+
+  if (heat.glow) {
+    fill.classList.add('max-heat');
+  } else {
+    fill.classList.remove('max-heat');
+  }
+
+  currentLevel = level;
+}
+
+/* ================================
+   RESET
+================================ */
+
+function resetMeter() {
+  fill.style.width = '0%';
+  fill.style.backgroundColor = '#FFD900';
+  fill.classList.remove('max-heat');
+  currentLevel = 0;
+}
+
+/* ================================
+   TEST MODE RENDER
+================================ */
+
+function runTestMode() {
+  if (widgetData.testMode !== 'on') return;
+
+  const level = Math.max(1, widgetData.testLevel || 1);
+  const percent = Math.min(Math.max(widgetData.testProgress || 0, 0), 100);
+
+  applyMeter(level, percent);
+}
+
+/* ================================
+   WEBSOCKET CONNECTION
+   Connects to your proxy server which
+   forwards Twitch EventSub hype train
+   events to this overlay.
+================================ */
+
+function connectWebSocket() {
+  if (!widgetData.proxyUrl) return;
+
+  // Clean up any existing connection
+  if (socket) {
+    socket.onclose = null;
+    socket.close();
+  }
+
+  socket = new WebSocket(widgetData.proxyUrl);
+
+  socket.onopen = function () {
+    console.log('[HypeTrain] WebSocket connected to proxy.');
+    clearTimeout(reconnectTimer);
+  };
+
+  socket.onmessage = function (event) {
+    let msg;
+    try {
+      msg = JSON.parse(event.data);
+    } catch (e) {
+      console.warn('[HypeTrain] Could not parse message:', event.data);
+      return;
+    }
+
+    // Expected message shapes from proxy:
+    // { type: 'hypeTrainBegin',    level: 1, progress: 0,    goal: 1500 }
+    // { type: 'hypeTrainProgress', level: 3, progress: 1200, goal: 3000 }
+    // { type: 'hypeTrainEnd' }
+
+    // Begin and progress are rendered the same way: animate the fill to the
+    // current level's percentage. Pass the raw ratio — applyMeter ignores a
+    // non-finite result (e.g. goal of 0), so the bar is never blanked between
+    // events; the CSS transition carries it from its current position.
+    if (msg.type === 'hypeTrainBegin' || msg.type === 'hypeTrainProgress') {
+      applyMeter(msg.level, (msg.progress / msg.goal) * 100);
+    }
+
+    if (msg.type === 'hypeTrainEnd') {
+      resetMeter();
+    }
+  };
+
+  socket.onerror = function (err) {
+    console.error('[HypeTrain] WebSocket error:', err);
+  };
+
+  socket.onclose = function () {
+    console.warn('[HypeTrain] WebSocket closed. Reconnecting in 5s...');
+    reconnectTimer = setTimeout(connectWebSocket, 5000);
+  };
+}
+
+/* ================================
+   WIDGET LOAD
+================================ */
+
+window.addEventListener('onWidgetLoad', function (obj) {
+  widgetData = obj.detail.fieldData;
+
+  if (widgetData.testMode === 'on') {
+    runTestMode();
+  } else {
+    connectWebSocket();
+  }
+});
+
+/* ================================
+   FIELD UPDATES (LIVE SLIDER CHANGES)
+================================ */
+
+window.addEventListener('onWidgetDataUpdated', function (obj) {
+  widgetData = obj.detail.fieldData;
+
+  if (widgetData.testMode === 'on') {
+    // Disconnect live socket if switching to test mode
+    if (socket) {
+      socket.onclose = null;
+      socket.close();
+      socket = null;
+    }
+    clearTimeout(reconnectTimer);
+    runTestMode();
+  } else {
+    // Reconnect if switching to live mode
+    connectWebSocket();
+  }
+});
+
+/* ================================
+   FALLBACK: SE NATIVE EVENTS
+   Kept as a backup in case SE ever
+   properly supports hype train events.
+================================ */
+
+window.addEventListener('onEventReceived', function (obj) {
+  if (widgetData.testMode === 'on') return;
+  if (widgetData.proxyUrl) return; // proxy is handling it
+  if (obj.detail.listener !== 'event') return;
+
+  const event = obj.detail.event;
+
+  if (event.type === 'hypeTrainBegin' || event.type === 'hypeTrainProgress') {
+    const { progress, goal, level } = event;
+    applyMeter(level, (progress / goal) * 100);
+  }
+
+  if (event.type === 'hypeTrainEnd') {
+    resetMeter();
+  }
+});

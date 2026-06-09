@@ -128,6 +128,7 @@ function resetKeepalive() {
 
 function subscribeToHypeTrain() {
   const subscriptions = [
+    'channel.hype_train.begin',
     'channel.hype_train.progress',
     'channel.hype_train.end',
   ];
@@ -177,6 +178,16 @@ function subscribeToHypeTrain() {
 function handleNotification(payload) {
   const eventType = payload.subscription?.type;
   const event = payload.event;
+
+  if (eventType === 'channel.hype_train.begin') {
+    console.log(`[HypeTrain] Started at level ${event.level} — ${event.progress}/${event.goal}`);
+    broadcast({
+      type: 'hypeTrainBegin',
+      level: event.level,
+      progress: event.progress,
+      goal: event.goal,
+    });
+  }
 
   if (eventType === 'channel.hype_train.progress') {
     console.log(`[HypeTrain] Level ${event.level} — ${event.progress}/${event.goal}`);
