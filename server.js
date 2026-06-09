@@ -135,7 +135,7 @@ function subscribeToHypeTrain() {
   for (const subType of subscriptions) {
     const body = JSON.stringify({
       type: subType,
-      version: '1',
+      version: '2',
       condition: { broadcaster_user_id: config.broadcasterId },
       transport: { method: 'websocket', session_id: sessionId },
     });
