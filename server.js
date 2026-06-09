@@ -179,11 +179,11 @@ function handleNotification(payload) {
   const event = payload.event;
 
   if (eventType === 'channel.hype_train.progress') {
-    console.log(`[HypeTrain] Level ${event.level} — ${event.total}/${event.goal}`);
+    console.log(`[HypeTrain] Level ${event.level} — ${event.progress}/${event.goal}`);
     broadcast({
       type: 'hypeTrainProgress',
       level: event.level,
-      progress: event.total,
+      progress: event.progress,
       goal: event.goal,
     });
   }
