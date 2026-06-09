@@ -1,0 +1,19 @@
+{
+  "name": "hype-train-proxy",
+  "version": "1.0.0",
+  "description": "A lightweight, dependency-free HTTP/HTTPS reverse proxy server in Node.js.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "proxy",
+    "reverse-proxy",
+    "http",
+    "https"
+  ],
+  "license": "MIT"
+}
