@@ -88,7 +88,9 @@ function connectToTwitch() {
     if (type === 'session_welcome') {
       sessionId = msg.payload.session.id;
       console.log('[Twitch] Session ID:', sessionId);
-      subscribeToHypeTrain();
+      // Clear any stale hype train subscriptions left over from previous
+      // connections before subscribing fresh (avoids 429 limit errors).
+      deleteExistingHypeTrainSubscriptions().then(subscribeToHypeTrain);
     }
 
     if (type === 'notification') {
@@ -126,14 +128,74 @@ function resetKeepalive() {
    SUBSCRIBE TO HYPE TRAIN EVENTS
 ================================ */
 
-function subscribeToHypeTrain() {
-  const subscriptions = [
-    'channel.hype_train.begin',
-    'channel.hype_train.progress',
-    'channel.hype_train.end',
-  ];
+const HYPE_TRAIN_SUB_TYPES = [
+  'channel.hype_train.begin',
+  'channel.hype_train.progress',
+  'channel.hype_train.end',
+];
 
-  for (const subType of subscriptions) {
+// Minimal promise wrapper around the Twitch Helix API.
+function twitchApiRequest(method, path, body) {
+  return new Promise((resolve, reject) => {
+    const payload = body ? JSON.stringify(body) : null;
+
+    const options = {
+      hostname: 'api.twitch.tv',
+      path,
+      method,
+      headers: {
+        'Client-Id': config.clientId,
+        'Authorization': `Bearer ${config.accessToken}`,
+        'Content-Type': 'application/json',
+        ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => data += chunk);
+      res.on('end', () => {
+        let parsed = null;
+        try { parsed = data ? JSON.parse(data) : null; } catch { parsed = data; }
+        resolve({ statusCode: res.statusCode, body: parsed });
+      });
+    });
+
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+// List all EventSub subscriptions and delete any hype train ones left behind
+// by previous connections. Stale subscriptions count toward the account's
+// subscription limit and cause 429 errors when we try to subscribe again.
+async function deleteExistingHypeTrainSubscriptions() {
+  try {
+    const res = await twitchApiRequest('GET', '/helix/eventsub/subscriptions');
+    if (res.statusCode !== 200 || !res.body?.data) {
+      console.error('[Twitch] Could not list existing subscriptions:', res.body);
+      return;
+    }
+
+    const stale = res.body.data.filter((sub) => HYPE_TRAIN_SUB_TYPES.includes(sub.type));
+    console.log(`[Twitch] Found ${stale.length} existing hype train subscription(s) to delete.`);
+
+    for (const sub of stale) {
+      const del = await twitchApiRequest('DELETE', `/helix/eventsub/subscriptions?id=${sub.id}`);
+      if (del.statusCode === 204) {
+        console.log(`[Twitch] Deleted stale subscription ${sub.id} (${sub.type})`);
+      } else {
+        console.error(`[Twitch] Failed to delete subscription ${sub.id}:`, del.body);
+      }
+    }
+  } catch (err) {
+    console.error('[Twitch] Error cleaning up subscriptions:', err.message);
+  }
+}
+
+function subscribeToHypeTrain() {
+  for (const subType of HYPE_TRAIN_SUB_TYPES) {
     const body = JSON.stringify({
       type: subType,
       version: '2',
