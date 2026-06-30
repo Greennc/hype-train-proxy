@@ -39,9 +39,22 @@ const config = {
 const wss = new WebSocket.Server({ port: config.port });
 const overlayClients = new Set();
 
+// Last known hype train state. Held so that an overlay which connects
+// mid-train (e.g. SAMMI shows the OBS source and the browser reloads) can be
+// painted immediately instead of sitting at 0% until the next progress event,
+// which may be 30–60s away. Null whenever no train is active.
+let currentHypeTrain = null;
+
 wss.on('connection', (ws) => {
   overlayClients.add(ws);
   console.log(`[Proxy] Overlay connected. Total: ${overlayClients.size}`);
+
+  // Send the current train state to this fresh client right away so a reload
+  // never misses an in-progress train.
+  if (currentHypeTrain && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(currentHypeTrain));
+    console.log('[Proxy] Sent current hype train state to new overlay.');
+  }
 
   ws.on('close', () => {
     overlayClients.delete(ws);
@@ -243,6 +256,14 @@ function handleNotification(payload) {
 
   if (eventType === 'channel.hype_train.begin') {
     console.log(`[HypeTrain] Started at level ${event.level} — ${event.progress}/${event.goal}`);
+    // Stash as a progress-shaped snapshot. The overlay renders begin and
+    // progress identically, so a late-joining client can be replayed this.
+    currentHypeTrain = {
+      type: 'hypeTrainProgress',
+      level: event.level,
+      progress: event.progress,
+      goal: event.goal,
+    };
     broadcast({
       type: 'hypeTrainBegin',
       level: event.level,
@@ -253,16 +274,18 @@ function handleNotification(payload) {
 
   if (eventType === 'channel.hype_train.progress') {
     console.log(`[HypeTrain] Level ${event.level} — ${event.progress}/${event.goal}`);
-    broadcast({
+    currentHypeTrain = {
       type: 'hypeTrainProgress',
       level: event.level,
       progress: event.progress,
       goal: event.goal,
-    });
+    };
+    broadcast(currentHypeTrain);
   }
 
   if (eventType === 'channel.hype_train.end') {
     console.log('[HypeTrain] Ended.');
+    currentHypeTrain = null;
     broadcast({ type: 'hypeTrainEnd' });
   }
 }
