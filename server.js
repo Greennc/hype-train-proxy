@@ -80,30 +80,69 @@ function broadcast(data) {
 let twitchSocket = null;
 let sessionId = null;
 let keepaliveTimer = null;
+// How long to wait for any message before assuming the connection is dead.
+// Derived from the keepalive_timeout_seconds Twitch advertises in the welcome
+// message (default 10s) rather than hardcoded, so we stay in sync if it changes.
+let keepaliveMs = 25000;
+// Reconnect backoff for unexpected drops: starts fast, grows on repeated
+// failures, resets to 1s the moment we get a healthy welcome.
+let reconnectDelay = 1000;
 
-function connectToTwitch() {
-  console.log('[Twitch] Connecting to EventSub WebSocket...');
-  twitchSocket = new WebSocket('wss://eventsub.wss.twitch.tv/ws');
+// Connect to Twitch EventSub. With no argument this is a fresh connection that
+// (re)subscribes. With a reconnect_url (from a session_reconnect) it migrates:
+// the existing socket is kept live and keeps delivering events until this new
+// socket is welcomed, so there is no gap and subscriptions carry over.
+function connectToTwitch(reconnectUrl) {
+  const url = reconnectUrl || 'wss://eventsub.wss.twitch.tv/ws';
+  console.log(`[Twitch] Connecting to EventSub WebSocket${reconnectUrl ? ' (reconnect_url)' : ''}...`);
 
-  twitchSocket.on('open', () => {
+  const ws = new WebSocket(url);
+
+  // A fresh connection becomes the active socket immediately so keepalive and
+  // close handling target it. A migrating connection only takes over once it is
+  // welcomed (below), leaving the old socket active until then.
+  if (!reconnectUrl) twitchSocket = ws;
+
+  ws.on('open', () => {
     console.log('[Twitch] EventSub WebSocket opened.');
   });
 
-  twitchSocket.on('message', (raw) => {
+  ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
 
     const type = msg.metadata?.message_type;
 
-    // Reset keepalive on every message
+    // Any message (keepalive or notification) proves the connection is alive.
     resetKeepalive();
 
     if (type === 'session_welcome') {
       sessionId = msg.payload.session.id;
+
+      // Honor Twitch's advertised keepalive window; tolerate ~2 missed pings.
+      const keepaliveSeconds = msg.payload.session.keepalive_timeout_seconds || 10;
+      keepaliveMs = keepaliveSeconds * 2500;
+      reconnectDelay = 1000; // healthy connection — reset backoff
+      resetKeepalive();      // re-arm with the now-known timeout
+
+      // Finish a reconnect_url migration: retire the old socket now that this
+      // one is live. Strip its listeners first so its close doesn't reconnect.
+      if (reconnectUrl && twitchSocket && twitchSocket !== ws) {
+        const old = twitchSocket;
+        twitchSocket = ws;
+        old.removeAllListeners();
+        old.close();
+        console.log('[Twitch] Migrated to new session; old socket retired.');
+      }
+
       console.log('[Twitch] Session ID:', sessionId);
-      // Clear any stale hype train subscriptions left over from previous
-      // connections before subscribing fresh (avoids 429 limit errors).
-      deleteExistingHypeTrainSubscriptions().then(subscribeToHypeTrain);
+
+      // A migrated session inherits the existing subscriptions, so only
+      // (re)subscribe on a brand-new connection. Clearing stale subs first
+      // avoids 429 limit errors.
+      if (!reconnectUrl) {
+        deleteExistingHypeTrainSubscriptions().then(subscribeToHypeTrain);
+      }
     }
 
     if (type === 'notification') {
@@ -111,30 +150,35 @@ function connectToTwitch() {
     }
 
     if (type === 'session_reconnect') {
-      console.log('[Twitch] Reconnect requested.');
-      twitchSocket.close();
-      connectToTwitch();
+      const newUrl = msg.payload.session?.reconnect_url;
+      console.log('[Twitch] Reconnect requested; migrating via reconnect_url (old socket stays live).');
+      connectToTwitch(newUrl);
     }
   });
 
-  twitchSocket.on('close', () => {
-    console.warn('[Twitch] EventSub WS closed. Reconnecting in 5s...');
+  ws.on('close', () => {
+    // Ignore a superseded old socket closing during a migration.
+    if (ws !== twitchSocket) return;
     clearTimeout(keepaliveTimer);
-    setTimeout(connectToTwitch, 5000);
+    const delay = reconnectDelay;
+    reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+    console.warn(`[Twitch] EventSub WS closed. Reconnecting in ${Math.round(delay / 1000)}s...`);
+    setTimeout(() => connectToTwitch(), delay);
   });
 
-  twitchSocket.on('error', (err) => {
+  ws.on('error', (err) => {
     console.error('[Twitch] EventSub WS error:', err.message);
   });
 }
 
 function resetKeepalive() {
   clearTimeout(keepaliveTimer);
-  // Twitch sends a keepalive every 10s; if we miss 2, reconnect
+  // If we hear nothing within the advertised window (+margin), recycle the
+  // active socket; its close handler schedules the reconnect.
   keepaliveTimer = setTimeout(() => {
     console.warn('[Twitch] Keepalive timeout. Reconnecting...');
-    twitchSocket.close();
-  }, 25000);
+    if (twitchSocket) twitchSocket.close();
+  }, keepaliveMs);
 }
 
 /* ================================
